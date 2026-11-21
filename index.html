@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>For Alicia</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  :root { --ink:#fdf3d8; --bg:#05060a; }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; background:var(--bg); overflow:hidden; }
+  body { font-family:'Instrument Serif', Georgia, serif; color:var(--ink); }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  .top { position:fixed; top:6vh; left:0; right:0; text-align:center; padding:0 16px; pointer-events:none;
+         opacity:0; transition:opacity 2s ease; }
+  .top.on { opacity:1; }
+  .top h1 { font-weight:400; font-size:clamp(28px,6vw,52px); line-height:1.1; }
+  .top h1 em { color:#ff9fc4; }
+  .msg { position:fixed; left:0; right:0; bottom:0; padding:48px 20px calc(28px + env(safe-area-inset-bottom));
+         text-align:center; background:linear-gradient(to top, rgba(5,6,10,.92) 55%, rgba(5,6,10,0));
+         opacity:0; transition:opacity 1.5s ease; }
+  .msg.on { opacity:1; }
+  .msg p { max-width:34em; margin:0 auto; font-size:clamp(18px,3.4vw,26px); line-height:1.45; min-height:4.4em; }
+  .msg .from { margin-top:10px; font-style:italic; color:#ff9fc4; font-size:clamp(18px,3vw,24px); opacity:0; transition:opacity 1.2s; }
+  .msg .from.on { opacity:1; }
+  .hint { position:fixed; right:12px; top:10px; font:12px/1 system-ui,sans-serif; color:#fff6; cursor:pointer; background:none; border:0; padding:8px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="top" id="top"><h1>For You <em>Alicia</em></h1></div>
+<div class="msg" id="msg"><p id="txt"></p><div class="from" id="from"></div></div>
+<button class="hint" id="replay">↻ replay</button>
+
+<script>
+/* ================= EDIT THESE ================= */
+const NAME    = "Alicia";
+const MESSAGE = "Who needs flowers when I can code them for you? " +
+                "It may not be a real one that you can hold, but I made it with you in mind. " +
+                "I hope it brings a little smile to your face and reminds you that you deserve all the beautiful things in this world. " +
+                "Just a little something to make you feel special.";
+
+const FROM    = "— yours always, isiah";
+/* ============================================== */
+
+document.querySelector('h1 em').textContent = NAME;
+document.title = "For " + NAME;
+document.getElementById('from').textContent = FROM;
+
+const cvs = document.getElementById('c');
+const ctx = cvs.getContext('2d');
+const scene = document.createElement('canvas');
+const sctx  = scene.getContext('2d', { willReadFrequently:true });
+const small = document.createElement('canvas');
+const smctx = small.getContext('2d', { willReadFrequently:true });
+
+const RAMP = " .,:;i+*oxX#%@";
+let W,H,DPR,cols,rows,cw,ch,SW,SH,S,baseX,baseY;
+
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, 2);
+  W = innerWidth; H = innerHeight;
+  cvs.width = W*DPR; cvs.height = H*DPR;
+  cw = W < 600 ? 4.8 : 6.5; ch = cw*1.6;
+  cols = Math.floor(W/cw); rows = Math.floor(H/ch);
+  small.width = cols; small.height = rows;
+  SW = cols*4; SH = rows*4; scene.width = SW; scene.height = SH;
+  S = Math.min(SW*1.25, SH*0.62);
+  baseX = SW/2; baseY = SH*0.80;
+}
+addEventListener('resize', resize); resize();
+
+/* ---------- seeded random so the bouquet is always the same ---------- */
+function rng(seed){ return ()=> (seed = (seed*16807)%2147483647)/2147483647; }
+const R = rng(20241121);
+
+/* ---------- bouquet definition (x,y in units of S; y is up) ---------- */
+const PALETTE = [
+  {tip:'#d3162f', base:'#ffb36b', dot:'#5a0a14'}, // red
+  {tip:'#ff5fa8', base:'#fff0b0', dot:'#8a1050'}, // pink
+  {tip:'#ffc933', base:'#fff6c0', dot:'#7a4a00'}, // yellow
+  {tip:'#e8d4c4', base:'#ffe9a8', dot:'#8a4a1a'}, // cream
+  {tip:'#b535c8', base:'#ffd6f0', dot:'#4a0a60'}, // purple
+  {tip:'#ff8a3d', base:'#ffe08a', dot:'#7a2a00'}, // orange
+];
+const FLOWERS = [
+  [ 0.00,.74,.12,0], [-.20,.62,.115,1], [ .21,.63,.115,3], [-.38,.46,.11,2],
+  [ .39,.48,.11,5], [-.09,.50,.13,4], [ .11,.44,.125,0], [-.26,.32,.115,3],
+  [ .27,.31,.115,1], [ .00,.30,.12,2], [-.45,.28,.09,5], [ .46,.27,.09,4],
+].map((f,i)=>({ x:f[0], y:f[1], size:f[2], pal:PALETTE[f[3]],
+  delay: 0.25 + i*0.22, rot:(R()-.5)*.5, spin:R()*6, bend:(R()-.5)*.12 }));
+
+const T_STEMS = 4.0, T_BLOOM_END = 9.5, T_TEXT = 10.2;
+
+const ease = t => t<0?0:t>1?1:t*t*(3-2*t);
+const clamp01 = t => Math.max(0,Math.min(1,t));
+
+/* ---------- drawing helpers ---------- */
+function stemPoint(f, t, p, sway){
+  // quadratic bezier from base to head
+  const hx = baseX + f.x*S + sway, hy = baseY - f.y*S;
+  const cx = baseX + f.x*S*0.15 + f.bend*S, cy = baseY - f.y*S*0.55;
+  const u = 1-t;
+  return [ u*u*baseX + 2*u*t*cx + t*t*hx , u*u*baseY + 2*u*t*cy + t*t*hy ];
+}
+
+function drawStem(f, p, time){
+  const sway = Math.sin(time*.9 + f.spin)*S*.006*clamp01((time-T_STEMS)/3);
+  ctx_ = sctx;
+  sctx.lineCap = 'round';
+  const n = 28, m = Math.max(2, Math.floor(n*p));
+  sctx.strokeStyle = '#3fae3f'; sctx.lineWidth = S*.016;
+  sctx.beginPath();
+  for(let i=0;i<=m;i++){ const [x,y]=stemPoint(f,(i/n),p,sway); i?sctx.lineTo(x,y):sctx.moveTo(x,y); }
+  sctx.stroke();
+  // leaves
+  for(let k=0;k<4;k++){
+    const t = .25 + k*.17; if (t > p) continue;
+    const [x,y] = stemPoint(f,t,p,sway);
+    const dir = (k%2?1:-1);
+    const grow = clamp01((p - t)/.2);
+    sctx.save(); sctx.translate(x,y); sctx.rotate(dir*(.9+ .2*Math.sin(f.spin+k)));
+    leaf(S*.12*grow, S*.022*grow);
+    sctx.restore();
+  }
+  return stemPoint(f,Math.min(1,m/n),p,sway);
+}
+function leaf(len,wid){
+  if(len<1) return;
+  const g = sctx.createLinearGradient(0,0,0,-len);
+  g.addColorStop(0,'#1f7a2a'); g.addColorStop(1,'#7be36a');
+  sctx.fillStyle = g;
+  sctx.beginPath(); sctx.moveTo(0,0);
+  sctx.quadraticCurveTo(wid*2.2,-len*.5,0,-len);
+  sctx.quadraticCurveTo(-wid*2.2,-len*.5,0,0);
+  sctx.fill();
+}
+function petal(len,wid,pal,curl){
+  const g = sctx.createLinearGradient(0,0,0,-len);
+  g.addColorStop(0,pal.base); g.addColorStop(.45,pal.tip); g.addColorStop(1,pal.tip);
+  sctx.fillStyle = g;
+  sctx.beginPath(); sctx.moveTo(0,0);
+  sctx.bezierCurveTo(wid*1.5,-len*.25, wid*1.1,-len*.8, curl*wid, -len);
+  sctx.bezierCurveTo(-wid*1.1,-len*.8,-wid*1.5,-len*.25,0,0);
+  sctx.fill();
+  sctx.strokeStyle = 'rgba(0,0,0,.55)'; sctx.lineWidth = Math.max(1,len*.04); sctx.stroke();
+  sctx.strokeStyle = 'rgba(255,255,255,.35)'; sctx.lineWidth = Math.max(1,len*.025);
+  sctx.beginPath(); sctx.moveTo(0,-len*.08); sctx.lineTo(curl*wid*.3,-len*.85); sctx.stroke();
+  // speckles
+  sctx.fillStyle = pal.dot;
+  for(let i=0;i<7;i++){
+    const t = .12 + i*.09, side = (i%2?1:-1)*wid*.35*(1-t*.6);
+    sctx.fillRect(side-len*.012, -len*t, len*.025, len*.025);
+  }
+}
+function drawFlower(f, head, open, time){
+  const [hx,hy] = head;
+  const size = S*f.size;
+  sctx.save(); sctx.translate(hx,hy); sctx.rotate(f.rot);
+  sctx.scale(1, 0.82);
+  const L = size*(0.55 + 0.45*open), Wd = size*(0.20 + 0.10*open);
+  // 6 petals; draw lower-pointing ones first so upper ones sit on top
+  const petals = [];
+  for(let k=0;k<6;k++){
+    const a = k*Math.PI/3 + (k%2? Math.PI/6*0 : 0);
+    petals.push({a, inner:k%2});
+  }
+  petals.sort((p,q)=> Math.cos(q.a) - Math.cos(p.a));
+  for(const p of petals){
+    sctx.save();
+    const spread = p.a*open + (p.a>Math.PI? (p.a-2*Math.PI)*open - p.a*open : 0);
+    sctx.rotate(spread*(1) + Math.sin(time*1.3+f.spin+p.a)*.015*open);
+    const l = L*(p.inner?.9:1);
+    petal(l, Wd*(p.inner?.95:1), f.pal, p.inner?.4:-.3);
+    sctx.restore();
+  }
+  // stamens
+  if(open>.3){
+    sctx.strokeStyle = '#f6e7a8'; sctx.lineWidth = Math.max(1,size*.018);
+    sctx.fillStyle = f.pal.dot;
+    for(let k=0;k<6;k++){
+      const a = -Math.PI/2 + (k-2.5)*.38*open;
+      const l = size*.55*open;
+      sctx.beginPath(); sctx.moveTo(0,0); sctx.lineTo(Math.cos(a)*l, Math.sin(a)*l); sctx.stroke();
+      sctx.beginPath(); sctx.arc(Math.cos(a)*l, Math.sin(a)*l, size*.035, 0, 7); sctx.fill();
+    }
+  }
+  sctx.restore();
+}
+
+/* ---------- ASCII renderer ---------- */
+const stars = Array.from({length:Math.floor(cols*rows*.012)||40}, ()=>({
+  c:Math.floor(R()*5000), r:Math.floor(R()*5000), ph:R()*6.28 }));
+
+function render(time){
+  // scene
+  sctx.clearRect(0,0,SW,SH); sctx.fillStyle='#000'; sctx.fillRect(0,0,SW,SH);
+  // stems grow
+  const heads = FLOWERS.map((f,i)=>{
+    const p = ease((time - f.delay*.5)/ (T_STEMS-1.2));
+    return {f, p, head: drawStem(f,p,time)};
+  });
+  // flowers: bud -> bloom
+  for(const h of heads){
+    const open = ease((time - (T_STEMS-1.0) - h.f.delay*.6)/ (T_BLOOM_END - T_STEMS - 1));
+    if(h.p > .97){
+      drawFlower(h.f, h.head, open, time);
+    } else if (h.p>.05){
+      sctx.fillStyle = '#7be36a'; sctx.beginPath(); sctx.arc(h.head[0],h.head[1],S*.008,0,7); sctx.fill();
+    }
+  }
+  small.getContext('2d').imageSmoothingQuality = 'high';
+  smctx.clearRect(0,0,cols,rows); smctx.drawImage(scene,0,0,cols,rows);
+  const d = smctx.getImageData(0,0,cols,rows).data;
+
+  // paint
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.fillStyle = '#05060a'; ctx.fillRect(0,0,W,H);
+  ctx.font = `${ch*.95}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textBaseline = 'top';
+  // stars
+  for(const s of stars){
+    const tw = .35 + .35*Math.sin(time*1.4 + s.ph);
+    ctx.fillStyle = `rgba(255,255,255,${tw})`;
+    ctx.fillText(s.ph>3?'.':'·', (s.c%cols)*cw, (s.r%rows)*ch);
+  }
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const i = (r*cols+c)*4;
+      const R_=d[i], G=d[i+1], B=d[i+2];
+      const L = (0.299*R_ + 0.587*G + 0.114*B)/255;
+      if(L < .06) continue;
+      const idx = Math.min(RAMP.length-1, Math.floor(Math.pow(L,.7)*RAMP.length*1.15));
+      const ch_ = RAMP[idx]; if(ch_===' ') continue;
+      const m = Math.max(R_,G,B,1), k = 255/m * (.55 + .45*Math.min(1,L*1.6));
+      ctx.fillStyle = `rgb(${Math.min(255,R_*k)|0},${Math.min(255,G*k)|0},${Math.min(255,B*k)|0})`;
+      ctx.fillText(ch_, c*cw, r*ch);
+    }
+  }
+}
+
+/* ---------- timeline / message ---------- */
+const topEl = document.getElementById('top'), msgEl = document.getElementById('msg'),
+      txtEl = document.getElementById('txt'), fromEl = document.getElementById('from');
+let t0 = performance.now(), offset = 0, typed = 0;
+const hashT = /t=([\d.]+)/.exec(location.hash); if(hashT) offset = parseFloat(hashT[1]);
+
+function frame(now){
+  const time = (now - t0)/1000 + offset;
+  render(time);
+  if(time > 3) topEl.classList.add('on');
+  if(time > T_TEXT){
+    msgEl.classList.add('on');
+    const n = Math.min(MESSAGE.length, Math.floor((time - T_TEXT - .6)*28));
+    if(n>typed){ typed=n; txtEl.textContent = MESSAGE.slice(0,n); }
+    if(n>=MESSAGE.length) fromEl.classList.add('on');
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+document.getElementById('replay').onclick = ()=>{
+  t0 = performance.now(); offset = 0; typed = 0; txtEl.textContent='';
+  topEl.classList.remove('on'); msgEl.classList.remove('on'); fromEl.classList.remove('on');
+};
+</script>
+</body>
+</html>
